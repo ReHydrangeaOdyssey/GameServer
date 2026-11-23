@@ -9,6 +9,35 @@ use prost::Message;
 pub const MAX_BODY: usize = 1024 * 1024;
 pub const CONTEXT_HEADER: &str = "x-authenticated-context";
 
+pub async fn boundary(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if request.version() != axum::http::Version::HTTP_2 {
+        return Failure::BAD_REQUEST.into_response();
+    }
+    normalize_response(next.run(request).await)
+}
+
+pub fn normalize_response(mut response: Response) -> Response {
+    // Axum extractor and method rejections bypass the RPC handlers.
+    if response.status().is_client_error()
+        && response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            != Some("application/x-protobuf")
+    {
+        let allow = response.headers().get(header::ALLOW).cloned();
+        response = Failure(response.status(), 0).into_response();
+        if let Some(allow) = allow {
+            response.headers_mut().insert(header::ALLOW, allow);
+        }
+    }
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Failure(pub StatusCode, pub i32);
 impl Failure {

@@ -29,6 +29,7 @@ pub fn router(state: Application) -> Router {
         .route("/v1/control/{method}", post(control))
         .fallback(|| async { Failure::NOT_FOUND })
         .layer(DefaultBodyLimit::max(rpc::MAX_BODY))
+        .layer(axum::middleware::from_fn(rpc::boundary))
         .with_state(state)
 }
 async fn control(
