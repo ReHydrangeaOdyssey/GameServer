@@ -1,0 +1,3 @@
+[submodule "GameLogic"]
+	path = GameLogic
+	url = https://github.com/ReHydrangeaOdyssey/GameLogic.git

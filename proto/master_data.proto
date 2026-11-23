@@ -1,0 +1,167 @@
+syntax = "proto3";
+
+package game.model;
+
+import "game_types.proto";
+
+// Character / Skill / Ability / Tacticsの個別データ型。旧い一括配布メッセージは定義しない。
+
+message CharacterMasterData {
+  uint32 id = 1; // 原本CSVのID。論理型CharacterID。
+  CharacterAttribute attribute = 2; // 原本CSVのAttributeを同値Enum化。
+  uint32 hp = 3; // 原本CSVのHP。
+  uint32 attack = 4; // 原本CSVのAttack。
+  uint32 defense = 5; // 原本CSVのDefence。
+  SpeedRank speed = 6; // 原本CSVのSpeedを同値Enum化。
+  uint32 bp = 7; // 原本CSVのBP。
+  repeated uint32 skill_ids = 8; // 原本CSVのSkill→UFの非0値を列順に格納する加工済み参照。
+  repeated uint32 ability_ids = 9; // 別途確定したCharacterとAbilityの対応・装備情報がある場合のみ設定。Character CSVから推測しない。
+  repeated uint32 tactics_ids = 10; // 原本CSVのTactics1→Tactics2の非0値を列順に格納する加工済み参照。
+  // キャラクター名・肩書はClient表示用の別JSONから取得し、数値Masterには含めない。
+  // Rarityは原本14列にないため保持・推定しない。Characteristic/KnightSkill/SupportSkillは原本CSVに保持し、初期実装で効果へ変換しない。
+}
+
+message SkillTargetConditionData {
+  SkillTargetConditionID condition_id = 1; // 単体スキルの優先対象条件.
+  StatusAbnormalityID status_abnormality_id = 2; // condition_idがSTATUS_ABNORMALITYの場合に対象とする状態異常ID.
+}
+
+message SkillRandomAttackData {
+  uint32 min_hit_count = 1; // RND_NではN, RND_N_MではN. 1以上.
+  uint32 max_hit_count = 2; // RND_NではN, RND_N_MではM. min以上. 範囲内の整数を均等抽選する.
+}
+
+message SkillStatusAbnormalityData {
+  StatusAbnormalityID status_abnormality_id = 1; // 付与する状態異常ID.
+  float application_rate = 2; // ENEMY_STATUS_*の付与率。CSV 0..4を0.20/0.40/0.60/0.80/0.99へ変換し、敵1体ごとに独立抽選する。SLEEPはCOMAへ対応。
+}
+
+message SkillStatCorrectionData {
+  SkillStatTarget stat_target = 1; // 攻撃力/防御力/両方を選ぶ。両方の場合はSkillEffectComponentData.correction_valueを両能力へ適用。
+}
+
+message SkillHealData {
+  bool can_heal_incapacitated = 1; // trueはHP0専用、falseはHP1以上専用.
+  float heal_rate = 2; // 対象の最大HPに対する回復/復活割合.
+}
+
+message SkillEffectComponentData {
+  string code = 1; // CSVのMainEffectまたは+分割済みSubEffectの正式コード.
+  optional uint32 level = 2; // 対応する段階。CSV空欄=未設定、0=有効な最小段階.
+  optional SkillEffectID effect_id = 3; // 既存5種の共通効果に変換可能な場合だけ設定。特殊効果はcodeで識別.
+  optional float correction_value = 4; // 確定したCSV段階表から換算。一般攻撃/ランダム1HIT/固定ダメージ/バフ・デバフで単位が異なる。空欄と0を区別.
+  optional SkillTargetRange target_range = 5; // 対象範囲。0も有効なEnum値.
+  SkillTargetConditionData target_condition = 6; // 単体対象の優先条件.
+  optional SkillDamageValueType damage_value_type = 7; // RATE/FIXED。0も有効なEnum値.
+  optional SkillTargetSide target_side = 8; // 対象となる陣営。0も有効なEnum値.
+
+  oneof effect_data {
+    SkillRandomAttackData random_attack = 9; // 固定または可変HIT数.
+    SkillStatusAbnormalityData status_abnormality = 10; // 状態異常IDと付与率.
+    SkillStatCorrectionData stat_correction = 11; // 能力補正の対象.
+    SkillHealData heal = 12; // 回復/蘇生割合とHP0対象区分.
+  }
+}
+
+message SkillMasterData {
+  uint32 id = 1; // CSVのID。論理型SkillID.
+  string name = 2; // CSVのName.
+  string description = 3; // CSVのDescription.
+  SkillEffectComponentData main_effect = 4; // CSVのMainEffect。必須、最初に実行する.
+  repeated SkillEffectComponentData sub_effects = 5; // CSVのSubEffectを+で分割。列の左から順に実行する.
+  optional uint32 probability_level = 6; // CSVのProbabilityLevel。共通0..4=20/40/60/80/99%、DAMAGE_X2は別式(level+1)*0.1。未設定と0を区別.
+  float activation_rate = 7; // 従来の基本Skill発動率0.2への加算値。CSV確率段階とは別.
+  uint32 max_activation_count = 8; // 1戦闘中の最大発動回数。u32::MAXは無制限.
+}
+
+message AbilityActivationConditionData {
+  AbilityConditionID condition_id = 1; // アビリティの発動条件.
+  uint32 condition_value = 2; // condition_idが具体値を必要とする場合の発動条件値. 論理型ConditionValue.
+  AbilityTurnTiming turn_timing = 3; // condition_idがABILITY_CONDITION_EVERY_N_TURNSの場合の評価タイミング. それ以外では参照しない.
+}
+
+message AbilityCorrectionData {
+  float correction_value = 1; // 単一の補正値で表現するアビリティ効果値. 論理型CorrectionValue.
+}
+
+message AbilityNoParameterData {
+}
+
+message AbilityStatusAbnormalityData {
+  optional StatusAbnormalityID status = 1; // 状態異常回避では回避対象ID, 状態異常攻撃では付与対象ID. 通常攻撃回避では設定しない.
+  optional AbilityAvoidanceType avoidance_type = 2; // 回避では必須. 通常攻撃回避か状態異常回避かを指定する. 状態異常攻撃では設定しない.
+}
+
+message AbilityStatCorrectionData {
+  float attack = 1; // 攻撃に対する補正値. 論理型CorrectionValue.
+  float defense = 2; // 防御に対する補正値. 論理型CorrectionValue.
+}
+
+message AbilityIncapacitatedAllyCountStatCorrectionEntry {
+  uint32 incapacitated_ally_count = 1; // 戦闘不能の味方人数. 0～4.
+  float attack = 2; // 当該人数で自身へ適用する攻撃補正値.
+  float defense = 3; // 当該人数で自身へ適用する防御補正値.
+}
+
+message AbilityIncapacitatedAllyCountStatCorrectionData {
+  repeated AbilityIncapacitatedAllyCountStatCorrectionEntry entries = 1; // 0～4の各人数について1件ずつ保持する.
+}
+
+message AbilityMasterData {
+  uint32 id = 1; // アビリティID. 論理型AbilityID.
+  string name = 2; // アビリティ名. 論理型Name.
+  string description = 3; // アビリティ効果説明文. 論理型Description.
+  repeated CharacterAttribute allowed_attributes = 4; // セット可能なキャラクター属性一覧.
+  float activation_rate = 5; // アビリティ発動率. 論理型Rate.
+  uint32 max_activation_count = 6; // 1戦闘中に発動可能な最大回数. 論理型Count.
+  AbilityActivationConditionData activation_condition = 7; // 発動条件と, 必要な場合の具体値.
+  AbilityEffectID effect_id = 8; // アビリティ効果種別. effect_dataの解釈を決定する.
+  AbilityTarget target = 13; // 効果適用対象. 戦闘フロー側で対象を決める効果ではABILITY_TARGET_NONE.
+
+  oneof effect_data {
+    AbilityCorrectionData correction = 9; // 単一の補正値を実際に使用する効果で使用する.
+    AbilityStatusAbnormalityData status_abnormality = 10; // 回避または状態異常攻撃で使用する.
+    AbilityStatCorrectionData stat_correction = 11; // 攻撃・防御を同時または個別に補正するバフ・デバフで使用する.
+    AbilityNoParameterData no_parameter = 12; // 効果固有値を使用しない効果で使用する.
+    AbilityIncapacitatedAllyCountStatCorrectionData incapacitated_ally_count_stat_correction = 14; // 戦闘不能の味方人数ごとの自身の攻撃/防御補正.
+  }
+}
+
+message TacticsStageEffectData {
+  TacticsEffectID effect_id = 1; // 段階効果の対象となる効果種別.
+  TacticsTarget target = 2; // 段階効果の対象.
+  uint32 effect_index = 6; // 同一TacticsMasterData.effects内の対象要素Index. effect_id/targetが同一の複数効果も本Indexで一意に対応付ける.
+
+  oneof increase_data {
+    float increase_value = 3; // 浮動小数点で表現する効果の1段階あたり増加値. 論理型CorrectionValue.
+    uint32 increase_uint_value = 4; // BP固定回復等, 整数で表現する効果の1段階あたり増加値.
+    TacticsBattleSpecialParameters battle_special_increase = 5; // BATTLE_SPECIALの各数値パラメータに対する1段階あたり増加値.
+  }
+}
+
+message TacticsEffectData {
+  TacticsEffectID effect_id = 1; // タクティクス効果種別.
+  TacticsTarget target = 2; // タクティクス効果対象.
+
+  oneof effect_data {
+    float correction_value = 3; // 補正値・割合等, 浮動小数点で表現する基本効果値. 論理型CorrectionValue.
+    uint32 uint_value = 4; // BP固定回復等, 整数で表現する基本効果値.
+    TacticsHpRecoveryData hp_recovery = 5; // HP_RECOVERYのHP回復方式・割合.
+    TacticsBattleSpecialData battle_special = 6; // BATTLE_SPECIALの特殊効果定義.
+  }
+}
+
+message TacticsMasterData {
+  uint32 id = 1; // タクティクスID. 論理型TacticsID.
+  string name = 2; // タクティクス名. 論理型Name.
+  string description = 3; // タクティクス効果説明文. 論理型Description.
+  TacticsCategory category = 4; // タクティクス分類. Client側のアイコン分類にも使用する.
+  uint32 tp_cost = 5; // 使用時に消費するTP.wire上はuint32, 論理型TP.
+  repeated TacticsStageEffectData stage_effects = 6; // 効果ごとの1段階あたり増加値一覧. HP_RECOVERYの割合型ではincrease_valueをrecovery_rateへ加算する.
+  TacticsEndType end_type = 7; // 効果終了方式.
+  uint32 duration_seconds = 8; // end_typeがDURATIONの場合の効果時間. 論理型DurationSeconds.
+  uint32 effect_count = 9; // end_typeがCOUNTの場合の効果回数. 論理型Count.
+  TacticsCountConsumeTrigger count_consume_trigger = 10; // end_typeがCOUNTの場合に残り回数を消費するイベント.
+  repeated TacticsEffectData effects = 11; // タクティクスが持つ基本効果一覧.
+  TacticsUseCondition use_condition = 12; // 使用要求時に満たす必要がある追加条件.
+}
