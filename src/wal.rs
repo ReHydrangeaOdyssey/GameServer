@@ -13,6 +13,11 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 const MAX_RECORD_BYTES: u64 = 4 * 1024 * 1024;
+#[derive(Clone, Copy)]
+pub struct StorageLimits {
+    pub max_bytes: u64,
+    pub max_files: u64,
+}
 struct Work {
     record: Record,
     reply: oneshot::Sender<Result<Record, Failure>>,
@@ -26,16 +31,20 @@ impl WalWriter {
         key: SigningKey,
         capacity: usize,
         anchors: BTreeMap<u64, (u64, [u8; 32])>,
+        limits: StorageLimits,
     ) -> Result<Self, crate::transport::Error> {
         if capacity == 0 {
             return Err("WAL queue capacity must be positive".into());
+        }
+        if limits.max_bytes == 0 || limits.max_files == 0 {
+            return Err("WAL storage byte and file limits must be positive".into());
         }
         let (queue, mut receive) = mpsc::channel::<Work>(capacity);
         let key = Arc::new(key);
         tokio::spawn(async move {
             let mut anchors = anchors;
             while let Some(work) = receive.recv().await {
-                let result = write(&root, key.clone(), work.record, &mut anchors).await;
+                let result = write(&root, key.clone(), work.record, &mut anchors, limits).await;
                 let _closed = work.reply.send(result);
             }
         });
@@ -55,6 +64,7 @@ async fn write(
     key: Arc<SigningKey>,
     mut record: Record,
     anchors: &mut BTreeMap<u64, (u64, [u8; 32])>,
+    limits: StorageLimits,
 ) -> Result<Record, Failure> {
     let (last, previous) = anchors
         .get(&record.guild_battle_id)
@@ -69,14 +79,18 @@ async fn write(
     .await
     .map_err(|_| Failure::UNAVAILABLE)??;
     record.verify(&key.verifying_key(), expected, previous)?;
-    persist(root, &record).await?;
+    persist(root, &record, limits).await?;
     anchors.insert(
         record.guild_battle_id,
         (record.event_index, unhex(&record.event_hash)?),
     );
     Ok(record)
 }
-async fn persist(root: &Path, record: &Record) -> Result<(), Failure> {
+async fn persist(root: &Path, record: &Record, limits: StorageLimits) -> Result<(), Failure> {
+    let metadata = tokio::fs::symlink_metadata(root).await.map_err(io)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Failure::CONFLICT);
+    }
     let folder = root.join(format!(
         "guild_battle_{}_{}",
         record.guild_battle_id, record.instance_id
@@ -124,6 +138,7 @@ async fn persist(root: &Path, record: &Record) -> Result<(), Failure> {
             .map_err(io)?;
         return sync_directory(&folder).await;
     }
+    check_storage(root, bytes.len() as u64, limits).await?;
     let temporary = folder.join(format!(
         ".event_{}_{}.tmp",
         record.event_index,
@@ -140,6 +155,41 @@ async fn persist(root: &Path, record: &Record) -> Result<(), Failure> {
     drop(file);
     tokio::fs::rename(&temporary, &target).await.map_err(io)?;
     sync_directory(&folder).await
+}
+
+// The instance storage root must have one writer. Count unfinished temporary files too:
+// failed persistence must never make quota usage disappear before recovery verifies it.
+async fn check_storage(root: &Path, additional: u64, limits: StorageLimits) -> Result<(), Failure> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut used_bytes = 0_u64;
+    let mut used_files = 0_u64;
+    while let Some(folder) = pending.pop() {
+        let mut entries = tokio::fs::read_dir(folder).await.map_err(io)?;
+        while let Some(entry) = entries.next_entry().await.map_err(io)? {
+            let kind = entry.file_type().await.map_err(io)?;
+            if kind.is_symlink() {
+                return Err(Failure::CONFLICT);
+            }
+            if kind.is_dir() {
+                pending.push(entry.path());
+                continue;
+            }
+            if !kind.is_file() {
+                return Err(Failure::CONFLICT);
+            }
+            let size = entry.metadata().await.map_err(io)?.len();
+            used_bytes = used_bytes.checked_add(size).ok_or(Failure::UNAVAILABLE)?;
+            used_files = used_files.checked_add(1).ok_or(Failure::UNAVAILABLE)?;
+            if used_bytes > limits.max_bytes || used_files > limits.max_files {
+                return Err(Failure::UNAVAILABLE);
+            }
+        }
+    }
+    // Projected usage = all existing files + this one immutable record (temp is renamed).
+    if additional > limits.max_bytes.saturating_sub(used_bytes) || used_files == limits.max_files {
+        return Err(Failure::UNAVAILABLE);
+    }
+    Ok(())
 }
 #[cfg(unix)]
 async fn sync_directory(path: &Path) -> Result<(), Failure> {
